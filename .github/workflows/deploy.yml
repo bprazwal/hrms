@@ -1,0 +1,63 @@
+name: Build and Deploy HRMS
+
+on:
+  push:
+    branches:
+      - develop
+  schedule:
+    - cron: '0 0 * * *'  # Runs daily to check for updates
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout frappe_docker
+        uses: actions/checkout@v2
+        with:
+          repository: frappe/frappe_docker
+          ref: main
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v1
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate APPS_JSON
+        run: |
+          APPS_JSON='[
+            {"url": "https://github.com/frappe/erpnext.git", "branch": "develop"},
+            {"url": "https://github.com/frappe/hrms.git", "branch": "develop"}
+          ]'
+          APPS_JSON_BASE64=$(echo $APPS_JSON | base64 -w 0)
+          echo "APPS_JSON_BASE64=$APPS_JSON_BASE64" >> $GITHUB_ENV
+
+      - name: Build and push Docker image
+        run: |
+          docker build -f images/custom/Dockerfile \
+            --build-arg=FRAPPE_PATH=https://github.com/frappe/frappe.git \
+            --build-arg=FRAPPE_BRANCH=develop \
+            --build-arg=APPS_JSON_BASE64=${{ env.APPS_JSON_BASE64 }} \
+            --tag=ghcr.io/${{ github.repository_owner }}/hrms-image:latest \
+            --push \
+            .
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to server
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USERNAME }}
+          key: ${{ secrets.SSH_KEY }}
+          script: |
+            cd /opt/hrms/docker-compose.yml
+            docker-compose pull web
+            docker-compose up -d
+            docker-compose exec -T web bench --site hrms.local migrate
